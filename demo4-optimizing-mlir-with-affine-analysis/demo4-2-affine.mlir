@@ -1,3 +1,25 @@
+// Equivalent C (before loop fusion):
+//
+//   float A[256][512], B[512][1024];
+//   float C[256][1024];  // 1 MB intermediate buffer
+//   float out[256][1024];
+//
+//   // Loop nest 1: zero-initialize C
+//   for (int i = 0; i < 256; i++)
+//     for (int j = 0; j < 1024; j++)
+//       C[i][j] = 0.0f;
+//
+//   // Loop nest 2: matmul into C
+//   for (int i = 0; i < 256; i++)
+//     for (int j = 0; j < 1024; j++)
+//       for (int k = 0; k < 512; k++)
+//         C[i][j] += A[i][k] * B[k][j];
+//
+//   // Loop nest 3: ReLU from C into out
+//   for (int i = 0; i < 256; i++)
+//     for (int j = 0; j < 1024; j++)
+//       out[i][j] = C[i][j] > 0.0f ? C[i][j] : 0.0f;
+
 module {
   func.func @main() -> memref<256x1024xf32> {
     %cst = arith.constant 0.000000e+00 : f32

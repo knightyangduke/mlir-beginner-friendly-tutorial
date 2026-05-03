@@ -8,21 +8,13 @@
 /// trivial to build a tool to do this conversion for this particular example.
 
 // This is used by the linalg.generic op later. See that section for more info.
+// NOTE: affine_map<(i, j) -> (i, j)> means "index output[i,j] with the same
+//       (i,j) as input" — i.e. no transposition, no broadcasting. Both ins
+//       and outs use this same map, so it's a straight elementwise iteration.
 #map = affine_map<(i, j) -> (i, j)>
 
 // This is the top-level container operation. It is part of the "builtin" dialect.
 //
-// This is the first occurence in this tutorial of something called an
-// "Operation" in MLIR. Operations have application-specific semantics, meaning
-// that their functionality is defined by the context in which they are used in.
-// Applications have names, may return results, may take operands, may have
-// properties, may have attributes, and may have regions which can contain other
-// Operations. In this case, the ModuleOp contains one region. 
-//
-// A dialect in MLIR is a collection of Operations at some level of abstraction.
-// For the builtin dialect, these are used for MLIR-specific organization. The
-// built-in dialect often has no meaning to the code itself, and is used within
-// MLIR to help with the language specification of MLIR.
 //
 // This operation contains all of the code which will be compiled through MLIR.
 // It is used within the compiler to apply overall attributes to all operations
@@ -41,12 +33,8 @@ module {
 func.func @main() -> tensor<256x1024xf32> {
     // This is the first occurence of a "Value" in this tutorial. Values are
     // what may get returned from operations. In MLIR, these are named using the
-    // "%" symbol. Values in MLIR are Static-Single-Assignment (SSA). This means
-    // that their value does not mutate during execution and they are only
-    // assigned to once. This is a useful property since it makes the Data Flow
-    // Graph (DFG) of functions directed and acyclic which enables many compiler
-    // optimizations.
-    //
+    // "%" symbol. Values in MLIR are Static-Single-Assignment (SSA). 
+
     // Values in MLIR always have a "type". In this case, this value is a Tensor
     // type. The Tensor type specifies a multi-dimensional array; however, there
     // is NO concept of memory (i.e. how the data is stored in the device). This
@@ -54,28 +42,33 @@ func.func @main() -> tensor<256x1024xf32> {
     // A useful abstraction since it allows us to deal with compute at a higher
     // level of abstraction (not caring about how the buffers are allocated).
     //
-    // In demo1, the FC_INPUT and FC_WEIGHT matrices were just initialized with
-    // random values (not specifically 0 initialized). The "tensor" dialect
-    // provides ops to work with tensors. In this case, we use the TensorEmpty
-    // op to create an empty tensor of the given shape and type.
+
+    // NOTE: tensor.empty() allocates a tensor with UNDEFINED contents.
+    //       No memory is actually allocated here; this is just a placeholder
+    //       value at the tensor abstraction level. The compiler will decide
+    //       how/when to allocate memory during bufferization.
     %FC_INPUT = tensor.empty() : tensor<256x512xf32>
     %FC_WEIGHT = tensor.empty() : tensor<512x1024xf32>
 
+//============================================================================
     // Here we perform our first high-level linear-algebra operation. At a high
     // level, all we care about is that FC_INPUT and FC_WEIGHT are multiplied
-    // together. We do not care about the algorithm used to perform this matrix
-    // multiplication. Luckily, as part of the Linalg dialect, a matmul op
-    // exists which does exactly this! This MatMulOp takes 2 matrices as inputs
-    // and produces one matrix as output. What you may notice is that I have to
-    // create another tensor to act as my output. This is a quirk of the linalg
-    // dialect. Most ops in the linalg dialect need to know what is in the output
-    // tensor before the operation occured. Some operations, for example, may
-    // not set every value in the tensor and the user may want to zero initialize
-    // the output tensor. In this case, we must set the initial value of the
-    // output tensor to all 0s since matrix multiplies use multiply-accumulate
-    // instructions which accumulate into the output buffer.
+    // together. 
+
     %c_init = arith.constant 0.0 : f32
+    // NOTE: tensor.splat fills every element of the tensor with %c_init (0.0).
+    //       Unlike tensor.empty(), the contents ARE defined — all zeros.
+    //       This is required so the matmul MAC loop starts from 0.
     %matmul_init = tensor.splat %c_init : tensor<256x1024xf32>
+
+    // NOTE: 'outs' is dual-purpose here:
+    //   (1) INPUT role  — provides the initial value to accumulate into.
+    //                     linalg.matmul expands to C[i,j] += A[i,k] * B[k,j],
+    //                     so %matmul_init MUST be zero-initialized or the result
+    //                     will be wrong.
+    //   (2) OUTPUT role — its shape/type defines the result tensor.
+    //                     The produced SSA value is bound to %FC_OUTPUT.
+    // No memory is written at this level; bufferization handles that later.
     %FC_OUTPUT = linalg.matmul
                     ins(%FC_INPUT, %FC_WEIGHT : tensor<256x512xf32>, tensor<512x1024xf32>)
                     outs(%matmul_init : tensor<256x1024xf32>) -> tensor<256x1024xf32>
@@ -85,27 +78,36 @@ func.func @main() -> tensor<256x1024xf32> {
     // contain the ReLU activation function. MLIR generally contains ops for all
     // basic operations people may need, but ReLU may just not be common enough.
     // Luckily, in the linalg dialect there is a way to specify a "generic"
-    // linear algebra operation. Just like matmul before, we need to specify
-    // inputs and outputs; but now we also need to specify the function of this
-    // operation. We start by specifying how the matrices will be indexed and
-    // iterated over. The indexing maps I provided basically just say the we
-    // index the matrices without transposing. The iteration type I provided
-    // basically just say that we can iterate in any order (there is no data
-    // dependencies between iterations). Next, we specify the function of this
-    // operation. In this case, I used the "arithmetic" dialect to describe a
-    // compare and select that will set the input value to zero if it is negative.
-    // Since all values for this relu are being written into, and the %out is
-    // not being used, we can allocate the init tensor without setting it to some
-    // number.
+    // linear algebra operation.
+
+    // Since the ReLU body overwrites every element unconditionally,
+    // the initial contents of %relu_init don't matter — tensor.empty() is fine.
+    // 'outs' here is only needed to declare the output shape/type.
     %relu_init = tensor.empty() : tensor<256x1024xf32>
+
+
+    //There is one map per operand — one for each tensor in ins + outs. Here:
+    //ins has 1 tensor (%FC_OUTPUT) → first #map
+    //outs has 1 tensor (%relu_init) → second #map
     %OUT = linalg.generic { indexing_maps = [#map, #map],
                             iterator_types = ["parallel", "parallel"]}
                ins(%FC_OUTPUT : tensor<256x1024xf32>)
                outs(%relu_init : tensor<256x1024xf32>) {
+               // Per-element body. For each (i, j):
+               //   %in  = FC_OUTPUT[i, j]   (read-only, from ins)
+               //   %out = relu_init[i, j]   (read-only initial value, from outs — ignored here)
                ^bb0(%in: f32, %out: f32):
                     %c0 = arith.constant 0.0 : f32
+                    // NOTE: arith.cmpf ugt = floating-point "unordered greater than".
+                    //       Returns i1: true if %in > 0.0, false otherwise.
+                    //       "unordered" means NaN inputs yield true; use "ogt"
+                    //       if you want NaN to yield false instead.
                     %cmp = arith.cmpf ugt, %in, %c0 : f32
+                    // NOTE: arith.select is a ternary: if %cmp then %in else %c0.
+                    //       Together with cmpf this implements: max(%in, 0.0) = ReLU.
                     %sel = arith.select %cmp, %in, %c0 : f32
+                    // linalg.yield determines OUT[i, j] in the new output tensor.
+                    // It does NOT write into %out; %out is just a block argument.
                     linalg.yield %sel : f32
                } -> tensor<256x1024xf32>
 
@@ -117,4 +119,3 @@ func.func @main() -> tensor<256x1024xf32> {
 }
 
 }
-

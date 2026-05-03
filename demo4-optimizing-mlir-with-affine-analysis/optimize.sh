@@ -3,15 +3,15 @@
 set -ex
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-LLVM_BIN_DIR=$SCRIPT_DIR/../build/bin
+
 
 # Lets take the same example from Demo 2 again.
-$LLVM_BIN_DIR/mlir-opt \
+mlir-opt \
     $SCRIPT_DIR/../demo2-entering-mlir/demo2.mlir \
     -o $SCRIPT_DIR/demo4-0-linalg-on-tensor.mlir
 
 # Bufferize it.
-$LLVM_BIN_DIR/mlir-opt \
+mlir-opt \
     $SCRIPT_DIR/demo4-0-linalg-on-tensor.mlir \
     -one-shot-bufferize="bufferize-function-boundaries=true" \
     -o $SCRIPT_DIR/demo4-1-linalg-on-memref.mlir
@@ -20,7 +20,7 @@ $LLVM_BIN_DIR/mlir-opt \
 # In the Affine dialect, it provides analytical models to represent how memory
 # is accessed in a kernel. This is incredibly useful when performing
 # optimizations on the buffer level.
-$LLVM_BIN_DIR/mlir-opt \
+mlir-opt \
     $SCRIPT_DIR/demo4-1-linalg-on-memref.mlir \
     -convert-linalg-to-affine-loops \
     -o $SCRIPT_DIR/demo4-2-affine.mlir
@@ -33,7 +33,7 @@ $LLVM_BIN_DIR/mlir-opt \
 # case is that it removes the allocation of a 1MB memref! Beyond just saving
 # memory, the reduces the memory footprint of the entire kernel which can
 # improve cache locality.
-$LLVM_BIN_DIR/mlir-opt \
+mlir-opt \
     $SCRIPT_DIR/demo4-2-affine.mlir \
     -affine-loop-fusion \
     -o $SCRIPT_DIR/demo4-3-affine-fused.mlir
@@ -46,7 +46,7 @@ $LLVM_BIN_DIR/mlir-opt \
 # Note: This can make the MLIR code look very strange since it does some
 #       weirdness with the induction variables. To make it more readible for
 #       this tutorial, I normalize and canonicalize everything.
-$LLVM_BIN_DIR/mlir-opt \
+mlir-opt \
     $SCRIPT_DIR/demo4-3-affine-fused.mlir \
     -affine-loop-tile="cache-size=1024" \
     -affine-loop-normalize \
@@ -56,7 +56,7 @@ $LLVM_BIN_DIR/mlir-opt \
 # Once we have completed all of the Affine analysis we wish to perform, we lower
 # out of the affine dialect into the scf and memref dialects. This can then be
 # further lowered into LLVM, as shown in Demo 3.
-$LLVM_BIN_DIR/mlir-opt \
+mlir-opt \
     $SCRIPT_DIR/demo4-4-affine-fused-tiled.mlir \
     -lower-affine \
     -canonicalize \

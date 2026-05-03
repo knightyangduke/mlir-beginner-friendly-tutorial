@@ -1,3 +1,37 @@
+// Equivalent C (before tiling, i.e. after loop fusion):
+//
+//   float A[256][512], B[512][1024];
+//   float out[256][1024];
+//
+//   for (int i = 0; i < 256; i++) {
+//     for (int j = 0; j < 1024; j++) {
+//       float acc = 0.0f;
+//       for (int k = 0; k < 512; k++)
+//         acc += A[i][k] * B[k][j];
+//       out[i][j] = acc > 0.0f ? acc : 0.0f;
+//     }
+//   }
+
+// Equivalent C (after tiling, tile sizes TI=2, TJ=2):
+//
+//   float A[256][512], B[512][1024];
+//   float out[256][1024];
+//
+//   // Outer tile loops iterate over 2x2 blocks of output elements.
+//   // Each tile's working set: A[2][512] + B[512][2] = 8 KB, fits in L2 cache.
+//   for (int ii = 0; ii < 256; ii += 2) {       // 128 tiles along i
+//     for (int jj = 0; jj < 1024; jj += 2) {    // 512 tiles along j
+//       for (int i = ii; i < ii + 2; i++) {      // inner i (within tile)
+//         for (int j = jj; j < jj + 2; j++) {   // inner j (within tile)
+//           float acc = 0.0f;
+//           for (int k = 0; k < 512; k++)        // A[i][*] and B[*][j] stay in cache
+//             acc += A[i][k] * B[k][j];
+//           out[i][j] = acc > 0.0f ? acc : 0.0f;
+//         }
+//       }
+//     }
+//   }
+
 module {
   func.func @main() -> memref<256x1024xf32> {
     %cst = arith.constant 0.000000e+00 : f32

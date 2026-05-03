@@ -9,35 +9,46 @@ module {
     %alloc = memref.alloc() {alignment = 64 : i64} : memref<256x512xf32>
     %alloc_0 = memref.alloc() {alignment = 64 : i64} : memref<512x1024xf32>
     %alloc_1 = memref.alloc() {alignment = 64 : i64} : memref<256x1024xf32>
-    // Generated from: linalg.map outs(%alloc_1) () { linalg.yield %cst }
-    // The linalg-to-loops (convert-linalg-to-loops) pass unrolled the
-    // parallel map into explicit scf.for loops with scalar memref.store.
+
+    // Zero-initialize %alloc_1 (the matmul output buffer).
+    // This is the lowered form of `tensor.splat 0.0` from the original code.
+    // Required because the matmul loop below accumulates (+=) into this buffer.
+    //
+    // C equivalent:
+    //   for (int i = 0; i < 256; i++)
+    //     for (int j = 0; j < 1024; j++)
+    //       C[i][j] = 0.0f;
     scf.for %arg0 = %c0 to %c256 step %c1 {
       scf.for %arg1 = %c0 to %c1024 step %c1 {
         memref.store %cst, %alloc_1[%arg0, %arg1] : memref<256x1024xf32>
       }
     }
-    // Generated from: linalg.matmul ins(%alloc, %alloc_0) outs(%alloc_1)
-    // Three nested scf.for loops over (M=256, N=1024, K=512) implement C += A * B:
-    //   load A[i,k], load B[k,j], load C[i,j]
-    //   C[i,j] = C[i,j] + A[i,k] * B[k,j]  (mulf + addf = fused multiply-accumulate)
+
+    // Matrix multiply: C = A * B  (linalg.matmul lowered to loops)
+    //
+    // C equivalent:
+    //   for (int i = 0; i < 256; i++)
+    //     for (int j = 0; j < 1024; j++)
+    //       for (int k = 0; k < 512; k++)
+    //         C[i][j] += A[i][k] * B[k][j];  // multiply-accumulate
     scf.for %arg0 = %c0 to %c256 step %c1 {
       scf.for %arg1 = %c0 to %c1024 step %c1 {
         scf.for %arg2 = %c0 to %c512 step %c1 {
-          %0 = memref.load %alloc[%arg0, %arg2] : memref<256x512xf32>
-          %1 = memref.load %alloc_0[%arg2, %arg1] : memref<512x1024xf32>
-          %2 = memref.load %alloc_1[%arg0, %arg1] : memref<256x1024xf32>
+          %0 = memref.load %alloc[%arg0, %arg2] : memref<256x512xf32>//A[i][k]
+          %1 = memref.load %alloc_0[%arg2, %arg1] : memref<512x1024xf32>//B[k][j]
+          %2 = memref.load %alloc_1[%arg0, %arg1] : memref<256x1024xf32>//C[i][j]
           %3 = arith.mulf %0, %1 : f32
           %4 = arith.addf %2, %3 : f32
-          memref.store %4, %alloc_1[%arg0, %arg1] : memref<256x1024xf32>
+          memref.store %4, %alloc_1[%arg0, %arg1] : memref<256x1024xf32>//C[i][j]
         }
       }
     }
-    // Generated from: linalg.generic (ReLU) ins(%alloc_1) outs(%alloc_2)
-    // Two nested scf.for loops over (M=256, N=1024) apply element-wise ReLU:
-    //   out[i,j] = max(in[i,j], 0.0)  — implemented as cmpf ugt + select
-    // iterator_types = ["parallel", "parallel"] annotation is dropped. 
-    // convert-linalg-to-loops (what was used here) → generates scf.for — all parallelism info is discarded.
+    // ReLU: OUT = max(C[i][j], 0.0)  (linalg.generic lowered to loops)
+    //
+    // C equivalent:
+    //   for (int i = 0; i < 256; i++)
+    //     for (int j = 0; j < 1024; j++)
+    //       OUT[i][j] = C[i][j] > 0.0f ? C[i][j] : 0.0f;
     %alloc_2 = memref.alloc() {alignment = 64 : i64} : memref<256x1024xf32>
     scf.for %arg0 = %c0 to %c256 step %c1 {
       scf.for %arg1 = %c0 to %c1024 step %c1 {

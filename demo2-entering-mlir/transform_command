@@ -1,0 +1,2 @@
+# --convert-linalg-to-loops only works on memref operands, but your ops use tensors. You must bufferize first to convert tensors → memrefs, then lower to loops:
+mlir-opt --one-shot-bufferize="bufferize-function-boundaries=true" --convert-linalg-to-loops demo2.mlir -o output.mlir
